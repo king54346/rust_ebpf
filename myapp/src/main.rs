@@ -9,7 +9,7 @@ use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
 use log::{info, warn, debug};
-use myapp_common::{PacketBuffer, PacketLog, Payload};
+use myapp_common::{PacketBuffer, PacketBuffer2, PacketLog, Payload};
 use network_types::eth::{EthHdr, EtherType};
 use network_types::ip::{Ipv4Hdr, IpProto};
 use network_types::tcp::TcpHdr;
@@ -270,7 +270,10 @@ fn setup_tc_ringbuf(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
 
     loop {
         if let Some(item) = ring.next() {
-            info!("item: {:?}", &*item);
+            let data = unsafe { &*(item.as_ptr() as *const PacketBuffer2) };
+            println!("len{}",data.size);
+            let payload = String::from_utf8_lossy(&data.buf[..data.size]);
+            println!("payload{:?}",payload);
         }
     }
     Ok(())
