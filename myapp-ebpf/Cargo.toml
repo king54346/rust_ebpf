@@ -8,6 +8,8 @@ aya-bpf = { git = "https://github.com/aya-rs/aya" }
 aya-log-ebpf = { git = "https://github.com/aya-rs/aya" }
 myapp-common = { path = "../myapp-common" }
 network-types = "0.0.4"
+memoffset = "0.8"
+
 [[bin]]
 name = "myapp"
 path = "src/main.rs"
