@@ -1,5 +1,5 @@
 #![no_std]
-pub const MAX_MTU: usize = 128;
+pub const MAX_MTU: usize = 1518;
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct PacketBuffer {
@@ -35,6 +35,27 @@ pub struct PacketLog {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Payload {
-    pub buff: [u8; 1024],
+    pub buff: [u8; MAX_MTU],
     pub len: usize
 }
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct SyscallLog {
+    pub syscall: u32,
+    pub pid: u32,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for SyscallLog {}
+
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Filename {
+    pub filename: [u8; 127],
+    pub filename_len: u8,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for Filename {}

@@ -1,21 +1,25 @@
-use std::{mem, ptr};
+use std::ffi::CString;
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+use std::{mem, ptr, io, fs};
 use std::net::Ipv4Addr;
 use anyhow::{Context, Ok};
 use aya::maps::{HashMap, AsyncPerfEventArray, RingBuf, PerfEventArray};
-use aya::programs::{Xdp, XdpFlags, KProbe, tc, SchedClassifier, TcAttachType, CgroupSkb, CgroupSkbAttachType, BtfTracePoint, FEntry, TracePoint};
+use aya::programs::{Xdp, XdpFlags, KProbe, tc, SchedClassifier, TcAttachType, CgroupSkb, CgroupSkbAttachType, BtfTracePoint, FEntry, TracePoint, RawTracePoint};
 use aya::util::online_cpus;
 use aya::{include_bytes_aligned, Bpf, Btf};
 use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
 use log::{info, warn, debug};
-use myapp_common::{PacketBuffer, PacketLog, Payload};
+use myapp_common::{PacketBuffer, PacketBuffer2, PacketLog, Payload, SyscallLog, Filename};
 use network_types::eth::{EthHdr, EtherType};
 use network_types::ip::{Ipv4Hdr, IpProto};
 use network_types::tcp::TcpHdr;
 use network_types::udp::UdpHdr;
-use tokio::{signal, task}; //提供ctrl-c处理程序
-
+use tokio::{signal, task, sync::mpsc}; //提供ctrl-c处理程序
+use regex::Regex;
 #[derive(Debug, Parser)]
 struct Opt {
     #[clap(short, long, default_value = "eth0")]
@@ -67,9 +71,11 @@ async fn main() -> Result<(), anyhow::Error> {
     // setup_cgroup_mkdir(&mut bpf, &opt)?;
     // setup_kernel_clone(&mut bpf, &opt)?;
     // setup_sche_process_fork(&mut bpf, &opt)?;
-    //  setup_tc_ringbuf(&mut bpf, &opt)?;
-     setup_tc_perfbuf2(&mut bpf, &opt)?;
+    //   setup_tc_ringbuf(&mut bpf, &opt)?;
+    //setup_tc_perfbuf2(&mut bpf, &opt)?;
     // setup_tc_egress(&mut bpf, &opt)?;
+    setup_log_syscall(&mut bpf, &opt)?;
+
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");
@@ -269,9 +275,11 @@ fn setup_tc_ringbuf(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
     let mut ring = RingBuf::try_from(bpf.take_map("DATA2").unwrap())?;
 
     loop {
-    
         if let Some(item) = ring.next() {
-            info!("item: {:?}", &*item);
+            let data = unsafe { &*(item.as_ptr() as *const PacketBuffer2) };
+            println!("len{}",data.size);
+            let payload = String::from_utf8_lossy(&data.buf[..data.size]);
+            println!("payload{:?}",payload);
         }
     }
     Ok(())
@@ -330,5 +338,159 @@ fn setup_tc_egress(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
 
 
     blocklist.insert(block_addr, 0, 0)?;
+    Ok(())
+}
+
+fn setup_log_syscall(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
+
+    let mut perf_array = AsyncPerfEventArray::try_from(bpf.take_map("EVENTS1").unwrap())?;
+    let tracepoint: &mut RawTracePoint = bpf.program_mut("log_syscall").unwrap().try_into()?;
+    tracepoint.load()?;
+    // 监听系统调用开始
+    // 获取 pid 和 调用编号
+    tracepoint.attach("sys_enter")?;
+   
+
+
+    let mut pid_map = HashMap::try_from(bpf.take_map("PIDS").unwrap()).unwrap();
+    let kprobe: &mut KProbe = bpf.program_mut("log_pid").unwrap().try_into()?;
+    kprobe.load()?;
+    // RDI 寄存器 第一个参数 执行的程序的路径名  RSI 寄存器 包含第二个参数 执行的程序的参数  RDX 寄存器 新程序的环境变量
+    // 获取 pid 和 文件名
+    kprobe.attach("__x64_sys_execve", 0)?;
+   
+
+   
+
+    info!("Building Syscall Name Database");
+    
+    // 通过系统编号获取名称
+    let mut syscalls = std::collections::HashMap::new();
+
+    //列出系统支持的所有系统调用及其编号
+    let output = Command::new("ausyscall").arg("--dump").output()?;
+    println!("status: {}", output.status);
+    io::stdout().write_all(&output.stdout).unwrap();
+    io::stderr().write_all(&output.stderr).unwrap();
+    //使用正则表达式匹配每一行的输出
+    let pattern = Regex::new(r"([0-9]+)\t(.*)")?;
+    //插入到创建的 HashMap 中
+    String::from_utf8(output.stdout)?
+        .lines()
+        .filter_map(|line| pattern.captures(line))
+        .map(|cap| (cap[1].parse::<u32>().unwrap(), cap[2].trim().to_string()))
+        .for_each(|(k, v)| {
+            syscalls.insert(k, v);
+        });
+        
+    info!("Building Process Digest Map From /proc");
+
+    // 获取系统中所有的进程pid和path 插入到pid_map中
+    for prc in procfs::process::all_processes().unwrap() {
+        // 获取每个进程的可执行文件路径
+        if let core::result::Result::Ok(filename) = prc.exe() {
+            let filename = CString::new(filename.to_str().unwrap())?;
+            let filename_bytes = filename.as_bytes_with_nul();
+            let filename_len = filename_bytes.len() as u8;
+
+            let mut buf = [0u8; 127];
+            for (&x, p) in filename_bytes.iter().zip(buf.iter_mut()) {
+                *p = x;
+            }
+            let f = Filename {
+                filename: buf,
+                filename_len,
+            };
+            pid_map.insert(prc.pid() as u32, f, 0)?;
+        }
+    }
+    info!("Spawning Event Processing Thread");
+
+    let (tx, mut rx) = mpsc::channel(1000);
+
+    // 记录pid和文件摘要
+    let mut digests = std::collections::HashMap::new();
+
+    // 每个消息包含一个系统调用编号和一个进程ID，然后根据这些信息执行一系列的操作
+    task::spawn(async move {
+        //接收syscallog和pid
+        while let Some((syscall, pid)) = rx.recv().await {
+            //从map中获取pid 对应的进程信息
+            if let core::result::Result::Ok(proc) = pid_map.get(&pid, 0) {
+                // 解析文件名
+                let filename = unsafe {
+                    let end = proc.filename.iter().position(|&x| x == 0).unwrap_or(proc.filename_len as usize);
+                    std::str::from_utf8_unchecked(&proc.filename[0..end])
+                };
+                
+                // 如果包含这个文件名
+                if digests.contains_key(&pid) {
+                    let digest = digests.get(&pid).unwrap();
+                    info!(
+                        "got = syscall: {} pid: {} filename: {} digest: {}",
+                        syscalls.get(&syscall).unwrap_or(&syscall.to_string()),
+                        pid,
+                        filename,
+                        digest
+                    );
+                } else {
+                    // 获取文件路径
+                    let path = Path::new(filename);        
+                    if path.exists() {
+                        // 获取文件的元信息
+                        let meta = fs::metadata(path).unwrap();
+                        if meta.len() < 10240000 {
+                            // 计算path的摘要，并插入到digests中
+                            let digest = sha256::digest_file(path).unwrap();
+                            digests.insert(pid, digest.clone());
+                            info!(
+                                "got = syscall: {} pid: {} filename: {} digest: {}",
+                                syscalls.get(&syscall).unwrap_or(&syscall.to_string()),
+                                pid,
+                                filename,
+                                digest
+                            );
+                        } else {
+                            info!(
+                                "got = syscall: {} pid: {} filename: {} digest: ETOOBIG",
+                                syscalls.get(&syscall).unwrap_or(&syscall.to_string()),
+                                pid,
+                                filename
+                            );
+                        }
+                    } else {
+                        info!("path {} is not valid", filename);
+                    }
+                };
+            }
+        }
+    });
+
+    info!("Spawning eBPF Event Listener");
+    
+    for cpu_id in online_cpus()? {
+        // 读取sys_enter 的 SyscallLog
+        let mut buf = perf_array.open(cpu_id, None)?;
+        let tx = tx.clone();
+        task::spawn(async move {
+            let mut buffers = (0..10)
+                .map(|_| BytesMut::with_capacity(1024))
+                .collect::<Vec<_>>();
+            loop {
+                let events = buf.read_events(&mut buffers).await.unwrap();
+                let mut results = vec![];
+                for buf in buffers.iter_mut().take(events.read) {
+                    let ptr = buf.as_ptr() as *const SyscallLog;
+                    let data = unsafe { ptr.read_unaligned() };
+                    results.push((data.syscall, data.pid));
+                }
+                // 将收集到的数据通过异步通道发送出去
+                // 读取的多个 syscallog和pid通过通道发送出去
+                for res in results {
+                    tx.send(res).await.unwrap();
+                }
+            }
+        });
+    }
     Ok(())
 }

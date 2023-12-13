@@ -1,14 +1,14 @@
 #![no_std] //ebpf程序不能使用标准库
 #![no_main] //没有main函数
 
-use core::{mem, ffi::c_char};
+use core::{mem, ffi::c_char, slice};
 
 mod binding;
-use aya_bpf::{bindings::{xdp_action, TC_ACT_PIPE, TC_ACT_SHOT}, macros::{xdp, map, classifier, kprobe, cgroup_skb, btf_tracepoint, fentry, tracepoint}, programs::{XdpContext, TcContext, ProbeContext, SkBuffContext, BtfTracePointContext, FEntryContext, TracePointContext}, maps::{HashMap, PerfEventArray, PerCpuArray, RingBuf}, helpers::{bpf_probe_read_kernel, bpf_probe_read_kernel_str, bpf_probe_read_kernel_str_bytes}, BpfContext};
+use aya_bpf::{bindings::{xdp_action, TC_ACT_PIPE, TC_ACT_SHOT}, macros::{xdp, map, classifier, kprobe, cgroup_skb, btf_tracepoint, fentry, tracepoint, raw_tracepoint}, programs::{XdpContext, TcContext, ProbeContext, SkBuffContext, BtfTracePointContext, FEntryContext, TracePointContext, RawTracePointContext}, maps::{HashMap, PerfEventArray, PerCpuArray, RingBuf}, helpers::{bpf_probe_read_kernel, bpf_probe_read_kernel_str, bpf_probe_read_kernel_str_bytes, bpf_probe_read_user_str, bpf_probe_read_user_str_bytes}, BpfContext, PtRegs};
 use aya_log_ebpf::info;
 use binding::__be32;
 use memoffset::offset_of;
-use myapp_common::{PacketBuffer, PacketLog, PacketBuffer2, Payload, MAX_MTU};
+use myapp_common::{PacketBuffer, PacketLog, PacketBuffer2, Payload, MAX_MTU, SyscallLog, Filename};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr, IpProto},
@@ -323,10 +323,6 @@ fn try_cgroup_mkdir(ctx: BtfTracePointContext) -> Result<i32, i32> {
 }
 
 
-//
-
-
-
 
 #[map]
 static mut PAYLOAD: PerfEventArray<Payload> = PerfEventArray::with_max_entries(1024, 0);
@@ -374,29 +370,29 @@ fn try_tc_perfbuf2(ctx: TcContext) -> Result<i32, i32> {
     let p = REGISTERS.get_ptr_mut(0).ok_or(0)?;
 
     let size = ctx.skb.len() as usize;
-    
-    let len_to_copy = if size > 1024 {
-        1024
+
+    let len_to_copy = if size > MAX_MTU {
+        MAX_MTU
     } else {
         size
     };
-  // 检查 size 是否过小
-    if size < len_to_copy {
+    // 检查 size 是否过小
+    // if size < len_to_copy {
+    //     return Err(TC_ACT_PIPE);
+    // }
+
+    // 安全检查过bpf的验证器
+    if size < MAX_MTU {
         return Err(TC_ACT_PIPE);
     }
 
-    // 安全检查过bpf的验证器
-    if size < 1024 {
-        return Err(TC_ACT_PIPE);
-    }
-   
-    
-    unsafe { 
+
+    unsafe {
          // invaild zero 检查
-            if len_to_copy == 0 {
-                return Err(TC_ACT_PIPE);
-            }
-        
+         //    if len_to_copy == 0 {
+         //        return Err(TC_ACT_PIPE);
+         //    }
+
 
             ctx.load_bytes(0, &mut (*p).buff).map_err(|_| TC_ACT_PIPE)?;
             (*p).len = len_to_copy;
@@ -462,20 +458,31 @@ fn try_tc_ringbuf(ctx: TcContext) -> Result<i32, i32> {
  if let Some(mut buf) = DATA2.reserve::<PacketBuffer2>(0) {
         let len = ctx.skb.len() as usize;
 
+         let len_to_copy = if len > MAX_MTU {
+             MAX_MTU
+         } else {
+             len
+         };
+         // let buf_inner = unsafe { &mut () };
+         if len < MAX_MTU {
+             buf.discard(0);
+             return Err(TC_ACT_PIPE);
+         }
 
-        let buf_inner = unsafe { &mut ((*buf.as_mut_ptr()).buf) };
-
-        if len == 0 || len > 128 {
-            buf.discard(0);
-            return Err(TC_ACT_PIPE);
+        // if len == 0 || len > 128 {
+        //     buf.discard(0);
+        //     return Err(TC_ACT_PIPE);
+        // }
+        unsafe {
+            if ctx.load_bytes(0, &mut (*(buf.as_mut_ptr())).buf).is_ok() {
+                (*buf.as_mut_ptr()).size = len_to_copy;
+                buf.submit(0);
+            } else {
+                buf.discard(0);
+                return Err(TC_ACT_PIPE);
+            }
         }
 
-        if ctx.load_bytes(0, buf_inner).is_ok() {
-            buf.submit(0);
-        } else {
-            buf.discard(0);
-            return Err(TC_ACT_PIPE);
-        }
     }
 
     Ok(TC_ACT_PIPE)
@@ -513,3 +520,66 @@ fn try_tc_egress(ctx: TcContext) -> Result<i32, ()> {
     Ok(action)
 }
 
+
+
+
+#[map]
+static mut PIDS: HashMap<u32, Filename> = HashMap::with_max_entries(10240000, 0);
+
+#[kprobe]
+pub fn log_pid(ctx: ProbeContext) -> u32 {
+    match unsafe { try_log_pid(ctx) } {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+unsafe fn try_log_pid(ctx: ProbeContext) -> Result<u32, u32> {
+    //  
+    let pid = ctx.pid();
+    let mut f = Filename {
+        filename: [0u8; 127],
+        filename_len: 0,
+    };
+    // 
+    if PIDS.get(&pid).is_none() {
+        let regs = PtRegs::new(ctx.arg(0).unwrap());
+
+        let filename_addr: *const u8 = regs.arg(0).unwrap();
+               
+       bpf_probe_read_user_str_bytes(filename_addr as *const u8, &mut f.filename[0..127]).map_err(|e| e as u32)?;
+            // let filename_len = ;
+        f.filename_len=127;
+       
+        if PIDS.insert(&pid, &f, 0).is_err() {
+           return  Err(1);
+        };
+    }
+    Ok(0)
+}
+
+
+#[map]
+static mut EVENTS1: PerfEventArray<SyscallLog> =PerfEventArray::<SyscallLog>::with_max_entries(1024, 0);
+
+#[raw_tracepoint]
+pub fn log_syscall(ctx: RawTracePointContext) -> u32 {
+    match unsafe { try_log_syscall(ctx) } {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+// 每次调用触发时捕获进程ID和系统调用编号
+unsafe fn try_log_syscall(ctx: RawTracePointContext) -> Result<u32, u32> {
+    let args = slice::from_raw_parts(ctx.as_ptr() as *const usize, 2);
+    let syscall = args[1] as u64;
+    let pid = ctx.pid();
+    
+    let log_entry = SyscallLog {
+        pid,
+        syscall: syscall as u32,
+    };
+    
+    EVENTS1.output(&ctx, &log_entry, 0);
+    Ok(0)
+}
