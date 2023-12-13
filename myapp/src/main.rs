@@ -26,6 +26,24 @@ struct Opt {
     iface: String, 
 }
 
+
+#[no_mangle]
+#[inline(never)]
+pub extern "C" fn uprobed_function(_val: u32) {}
+
+fn get_base_addr() -> Result<usize, anyhow::Error> {
+    let me = Process::myself()?;
+    let maps = me.maps()?;
+
+    for entry in maps {
+        if entry.perms.contains("r-xp") {
+            return Ok((entry.address.0 - entry.offset) as usize);
+        }
+    }
+
+    anyhow::bail!("Failed to find executable region")
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse(); //解析Opt默认是eth0
@@ -493,4 +511,17 @@ fn setup_log_syscall(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
         });
     }
     Ok(())
+}
+
+fn setup_uprobe(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
+    let program: &mut UProbe = bpf.program_mut("uprobe").unwrap().try_into()?;
+    program.load()?;
+
+    let fn_addr = uprobed_function as *const () as usize;
+    let offset = fn_addr - get_base_addr()?;
+    //一个特殊的符号链接，指向当前进程的可执行文件意味着 uprobes 将附加到运行这段代码的程序上。
+    program.attach(None, offset as u64, "/proc/self/exe", None)?;
+
+    uprobed_function(11);
+    uprobed_function(12);
 }
