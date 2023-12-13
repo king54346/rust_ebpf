@@ -374,29 +374,29 @@ fn try_tc_perfbuf2(ctx: TcContext) -> Result<i32, i32> {
     let p = REGISTERS.get_ptr_mut(0).ok_or(0)?;
 
     let size = ctx.skb.len() as usize;
-
-    let len_to_copy = if size > MAX_MTU {
-        MAX_MTU
+    
+    let len_to_copy = if size > 1024 {
+        1024
     } else {
         size
     };
-    // 检查 size 是否过小
-    // if size < len_to_copy {
-    //     return Err(TC_ACT_PIPE);
-    // }
-
-    // 安全检查过bpf的验证器
-    if size < MAX_MTU {
+  // 检查 size 是否过小
+    if size < len_to_copy {
         return Err(TC_ACT_PIPE);
     }
 
-
-    unsafe {
+    // 安全检查过bpf的验证器
+    if size < 1024 {
+        return Err(TC_ACT_PIPE);
+    }
+   
+    
+    unsafe { 
          // invaild zero 检查
-         //    if len_to_copy == 0 {
-         //        return Err(TC_ACT_PIPE);
-         //    }
-
+            if len_to_copy == 0 {
+                return Err(TC_ACT_PIPE);
+            }
+        
 
             ctx.load_bytes(0, &mut (*p).buff).map_err(|_| TC_ACT_PIPE)?;
             (*p).len = len_to_copy;
@@ -462,31 +462,20 @@ fn try_tc_ringbuf(ctx: TcContext) -> Result<i32, i32> {
  if let Some(mut buf) = DATA2.reserve::<PacketBuffer2>(0) {
         let len = ctx.skb.len() as usize;
 
-         let len_to_copy = if len > MAX_MTU {
-             MAX_MTU
-         } else {
-             len
-         };
-         // let buf_inner = unsafe { &mut () };
-         if len < MAX_MTU {
-             buf.discard(0);
-             return Err(TC_ACT_PIPE);
-         }
 
-        // if len == 0 || len > 128 {
-        //     buf.discard(0);
-        //     return Err(TC_ACT_PIPE);
-        // }
-        unsafe {
-            if ctx.load_bytes(0, &mut (*(buf.as_mut_ptr())).buf).is_ok() {
-                (*buf.as_mut_ptr()).size = len_to_copy;
-                buf.submit(0);
-            } else {
-                buf.discard(0);
-                return Err(TC_ACT_PIPE);
-            }
+        let buf_inner = unsafe { &mut ((*buf.as_mut_ptr()).buf) };
+
+        if len == 0 || len > 128 {
+            buf.discard(0);
+            return Err(TC_ACT_PIPE);
         }
 
+        if ctx.load_bytes(0, buf_inner).is_ok() {
+            buf.submit(0);
+        } else {
+            buf.discard(0);
+            return Err(TC_ACT_PIPE);
+        }
     }
 
     Ok(TC_ACT_PIPE)

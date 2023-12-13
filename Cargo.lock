@@ -377,11 +377,13 @@ dependencies = [
  "anyhow",
  "aya",
  "aya-log",
+ "bytes",
  "clap",
  "env_logger",
  "libc",
  "log",
  "myapp-common",
+ "network-types",
  "tokio",
 ]
 
@@ -391,6 +393,12 @@ version = "0.1.0"
 dependencies = [
  "aya",
 ]
+
+[[package]]
+name = "network-types"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e3fa362b3a5e3ccc59979cb7bd254e404be05bbc18270b05d1289cb8cb8f44"
 
 [[package]]
 name = "num_cpus"

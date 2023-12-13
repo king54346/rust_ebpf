@@ -9,7 +9,7 @@ use aya_log::BpfLogger;
 use bytes::BytesMut;
 use clap::Parser;
 use log::{info, warn, debug};
-use myapp_common::{PacketBuffer, PacketBuffer2, PacketLog, Payload};
+use myapp_common::{PacketBuffer, PacketLog, Payload};
 use network_types::eth::{EthHdr, EtherType};
 use network_types::ip::{Ipv4Hdr, IpProto};
 use network_types::tcp::TcpHdr;
@@ -67,8 +67,8 @@ async fn main() -> Result<(), anyhow::Error> {
     // setup_cgroup_mkdir(&mut bpf, &opt)?;
     // setup_kernel_clone(&mut bpf, &opt)?;
     // setup_sche_process_fork(&mut bpf, &opt)?;
-      setup_tc_ringbuf(&mut bpf, &opt)?;
-    //setup_tc_perfbuf2(&mut bpf, &opt)?;
+    //  setup_tc_ringbuf(&mut bpf, &opt)?;
+     setup_tc_perfbuf2(&mut bpf, &opt)?;
     // setup_tc_egress(&mut bpf, &opt)?;
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
@@ -269,11 +269,9 @@ fn setup_tc_ringbuf(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
     let mut ring = RingBuf::try_from(bpf.take_map("DATA2").unwrap())?;
 
     loop {
+    
         if let Some(item) = ring.next() {
-            let data = unsafe { &*(item.as_ptr() as *const PacketBuffer2) };
-            println!("len{}",data.size);
-            let payload = String::from_utf8_lossy(&data.buf[..data.size]);
-            println!("payload{:?}",payload);
+            info!("item: {:?}", &*item);
         }
     }
     Ok(())
@@ -334,4 +332,3 @@ fn setup_tc_egress(bpf: &mut Bpf,opt:&Opt) -> Result<(), anyhow::Error>{
     blocklist.insert(block_addr, 0, 0)?;
     Ok(())
 }
-

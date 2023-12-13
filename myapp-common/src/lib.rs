@@ -1,5 +1,5 @@
 #![no_std]
-pub const MAX_MTU: usize = 1518;
+pub const MAX_MTU: usize = 128;
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct PacketBuffer {
@@ -35,6 +35,6 @@ pub struct PacketLog {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Payload {
-    pub buff: [u8; MAX_MTU],
+    pub buff: [u8; 1024],
     pub len: usize
 }
